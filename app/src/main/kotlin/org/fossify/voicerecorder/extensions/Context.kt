@@ -218,7 +218,7 @@ private fun Context.getDurationFromUri(uri: Uri): Long {
 }
 
 // Based on common's `Context.createSAFFileSdk30` extension
-fun Context.createDocumentFile(path: String): Uri? {
+fun Context.createDocumentFile(path: String, mimeType: String = path.getMimeType()): Uri? {
     return try {
         val treeUri = createFirstParentTreeUri(path)
         val parentPath = path.getParentPath()
@@ -231,7 +231,7 @@ fun Context.createDocumentFile(path: String): Uri? {
         DocumentsContract.createDocument(
             contentResolver,
             parentUri,
-            path.getMimeType(),
+            mimeType,
             path.getFilenameFromPath()
         )
     } catch (@Suppress("SwallowedException") e: IllegalStateException) {

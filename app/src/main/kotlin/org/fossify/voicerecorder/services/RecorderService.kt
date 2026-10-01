@@ -13,8 +13,6 @@ import android.os.IBinder
 import android.provider.DocumentsContract
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
-import org.fossify.commons.extensions.createDocumentUriUsingFirstParentTreeUri
-import org.fossify.commons.extensions.createSAFFileSdk30
 import org.fossify.commons.extensions.getDocumentFile
 import org.fossify.commons.extensions.getFilenameFromPath
 import org.fossify.commons.extensions.getLaunchIntent
@@ -29,6 +27,7 @@ import org.fossify.voicerecorder.BuildConfig
 import org.fossify.voicerecorder.R
 import org.fossify.voicerecorder.activities.SplashActivity
 import org.fossify.voicerecorder.extensions.config
+import org.fossify.voicerecorder.extensions.createDocumentFile
 import org.fossify.voicerecorder.extensions.getFormattedFilename
 import org.fossify.voicerecorder.extensions.updateWidgets
 import org.fossify.voicerecorder.helpers.CANCEL_RECORDING
@@ -58,6 +57,8 @@ class RecorderService : Service() {
 
 
     private var recordingPath = ""
+    private var partPath = ""
+    private var partDocumentUri: Uri? = null
     private var resultUri: Uri? = null
 
     private var duration = 0
@@ -105,7 +106,9 @@ class RecorderService : Service() {
 
         val recordingFolder = defaultFolder.absolutePath
         recordingPath = "$recordingFolder/${getFormattedFilename()}.${config.getExtension()}"
+        partPath = "$recordingPath.part"
         resultUri = null
+        partDocumentUri = null
 
         try {
             recorder = if (recordMp3()) {
@@ -115,20 +118,21 @@ class RecorderService : Service() {
             }
 
             if (isRPlus()) {
-                val fileUri = createDocumentUriUsingFirstParentTreeUri(recordingPath)
-                createSAFFileSdk30(recordingPath)
-                resultUri = fileUri
-                contentResolver.openFileDescriptor(fileUri, "w")!!
+                val partUri = createPartDocument()
+                partDocumentUri = partUri
+                resultUri = partUri
+                contentResolver.openFileDescriptor(partUri, "w")!!
                     .use { recorder?.setOutputFile(it) }
             } else if (isPathOnSD(recordingPath)) {
                 var document = getDocumentFile(recordingPath.getParentPath())
-                document = document?.createFile("", recordingPath.getFilenameFromPath())
+                document = document?.createFile("", partPath.getFilenameFromPath())
                 check(document != null) { "Failed to create document on SD Card" }
+                partDocumentUri = document.uri
                 resultUri = document.uri
                 contentResolver.openFileDescriptor(document.uri, "w")!!
                     .use { recorder?.setOutputFile(it) }
             } else {
-                recorder?.setOutputFile(recordingPath)
+                recorder?.setOutputFile(partPath)
                 resultUri = FileProvider.getUriForFile(
                     this, "${BuildConfig.APPLICATION_ID}.provider", File(recordingPath)
                 )
@@ -173,6 +177,7 @@ class RecorderService : Service() {
             }
 
             ensureBackgroundThread {
+                finalizeRecording()
                 scanRecording()
                 EventBus.getDefault().post(Events.RecordingCompleted())
             }
@@ -194,15 +199,71 @@ class RecorderService : Service() {
         }
 
         recorder = null
-        if (isRPlus()) {
-            val recordingUri = createDocumentUriUsingFirstParentTreeUri(recordingPath)
-            DocumentsContract.deleteDocument(contentResolver, recordingUri)
-        } else {
-            File(recordingPath).delete()
-        }
+        deletePartFile()
 
         EventBus.getDefault().post(Events.RecordingCompleted())
         stopSelf()
+    }
+
+    // creates the in-progress document as "<final>.part", typed with the final mime type so the
+    // provider accepts it; it gets renamed to the final name only when the recording is stopped
+    private fun createPartDocument(): Uri {
+        val documentUri = createDocumentFile(partPath, recordingPath.getMimeType())
+        check(documentUri != null) { "Failed to create recording file" }
+        return documentUri
+    }
+
+    // renames the in-progress ".part" file to its final name after stop()/release(), so
+    // unfinished recordings are never exposed under a final extension
+    private fun finalizeRecording() {
+        if (partPath.isEmpty()) {
+            return
+        }
+
+        val partUri = partDocumentUri
+        if (partUri != null) {
+            resultUri = try {
+                DocumentsContract.renameDocument(
+                    contentResolver,
+                    partUri,
+                    recordingPath.getFilenameFromPath()
+                )
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception
+            ) {
+                showErrorToast(e)
+                null
+            }
+            partDocumentUri = null
+        } else {
+            val partFile = File(partPath)
+            if (partFile.exists()) {
+                partFile.renameTo(File(recordingPath))
+            }
+        }
+        partPath = ""
+    }
+
+    // deletes the in-progress ".part" file when the recording is discarded
+    private fun deletePartFile() {
+        if (partPath.isEmpty()) {
+            return
+        }
+
+        val partUri = partDocumentUri
+        if (partUri != null) {
+            try {
+                DocumentsContract.deleteDocument(contentResolver, partUri)
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception
+            ) {
+                showErrorToast(e)
+            }
+            partDocumentUri = null
+        } else {
+            File(partPath).delete()
+        }
+        partPath = ""
     }
 
     private fun broadcastRecorderInfo() {
