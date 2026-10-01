@@ -53,6 +53,7 @@ class RecorderService : Service() {
         var isRunning = false
 
         private const val AMPLITUDE_UPDATE_MS = 75L
+        private const val STOP_TIMEOUT_MS = 3_000L
     }
 
 
@@ -160,29 +161,15 @@ class RecorderService : Service() {
         amplitudeTimer.cancel()
         status = RECORDING_STOPPED
 
-        recorder?.apply {
-            try {
-                stop()
-                release()
-            } catch (
-                @Suppress(
-                    "TooGenericExceptionCaught",
-                    "SwallowedException"
-                ) e: RuntimeException
-            ) {
-                toast(R.string.recording_too_short)
-            } catch (e: Exception) {
-                showErrorToast(e)
-                e.printStackTrace()
-            }
-
-            ensureBackgroundThread {
-                finalizeRecording()
-                scanRecording()
-                EventBus.getDefault().post(Events.RecordingCompleted())
-            }
-        }
+        val currentRecorder = recorder ?: return
         recorder = null
+
+        ensureBackgroundThread {
+            stopAndRelease(currentRecorder, reportErrors = true)
+            finalizeRecording()
+            scanRecording()
+            EventBus.getDefault().post(Events.RecordingCompleted())
+        }
     }
 
     private fun cancelRecording() {
@@ -190,19 +177,54 @@ class RecorderService : Service() {
         amplitudeTimer.cancel()
         status = RECORDING_STOPPED
 
-        recorder?.apply {
+        val currentRecorder = recorder
+        recorder = null
+
+        ensureBackgroundThread {
+            if (currentRecorder != null) {
+                stopAndRelease(currentRecorder, reportErrors = false)
+            }
+            deletePartFile()
+            EventBus.getDefault().post(Events.RecordingCompleted())
+            stopSelf()
+        }
+    }
+
+    // stop() is a synchronous binder call that can hang indefinitely when the device encoder
+    // stalls (observed with paused ogg recordings), so it runs on its own thread and is only
+    // awaited briefly - this keeps a wedged encoder from blocking the main thread (ANR) or
+    // delaying the ".part" rename; the still-open file descriptor keeps writing to the same
+    // inode after the rename, so data written late still lands in the final file
+    private fun stopAndRelease(recorderToStop: Recorder, reportErrors: Boolean) {
+        val stopThread = Thread {
             try {
-                stop()
-                release()
-            } catch (ignored: Exception) {
+                recorderToStop.stop()
+            } catch (
+                @Suppress(
+                    "TooGenericExceptionCaught",
+                    "SwallowedException"
+                ) e: RuntimeException
+            ) {
+                if (reportErrors) {
+                    toast(R.string.recording_too_short)
+                }
+            } catch (e: Exception) {
+                if (reportErrors) {
+                    showErrorToast(e)
+                }
+                e.printStackTrace()
+            } finally {
+                try {
+                    recorderToStop.release()
+                } catch (ignored: Exception) {
+                }
             }
         }
-
-        recorder = null
-        deletePartFile()
-
-        EventBus.getDefault().post(Events.RecordingCompleted())
-        stopSelf()
+        stopThread.start()
+        try {
+            stopThread.join(STOP_TIMEOUT_MS)
+        } catch (ignored: InterruptedException) {
+        }
     }
 
     // creates the in-progress document as "<final>.part", typed with an empty mime type so the
