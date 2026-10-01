@@ -205,10 +205,11 @@ class RecorderService : Service() {
         stopSelf()
     }
 
-    // creates the in-progress document as "<final>.part", typed with the final mime type so the
-    // provider accepts it; it gets renamed to the final name only when the recording is stopped
+    // creates the in-progress document as "<final>.part", typed with an empty mime type so the
+    // provider does not append its own extension to the ".part" name; the file mime is derived
+    // from the name again after it gets renamed to the final name on stop
     private fun createPartDocument(): Uri {
-        val documentUri = createDocumentFile(partPath, recordingPath.getMimeType())
+        val documentUri = createDocumentFile(partPath, "")
         check(documentUri != null) { "Failed to create recording file" }
         return documentUri
     }
