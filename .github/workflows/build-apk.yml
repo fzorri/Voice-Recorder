@@ -18,6 +18,20 @@ jobs:
 
       - uses: FossifyOrg/.github/.github/actions/gradle-cache@main
 
+      # stable debug signing key: restores the same signature on every run so new APKs
+      # install in place (no uninstall/re-grant); falls back to AGP's random key if unset
+      - name: Restore stable debug keystore
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$DEBUG_KEYSTORE_B64" ]; then
+            mkdir -p ~/.android
+            echo "$DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+            echo "Stable debug keystore restored"
+          else
+            echo "::warning::DEBUG_KEYSTORE_B64 secret not set - using a random keystore for this run"
+          fi
+
       - name: Build debug APK
         run: |
           chmod +x gradlew
